@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.venv/
+
+# VS Code
+.vscode/
+
+# Segreti (password, token)
+.env
+
+# Dati esplorativi e database locale
+exploration/
+*.db
+*.sqlite
+*.sqlite3
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Note personali
+private/
