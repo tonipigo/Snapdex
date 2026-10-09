@@ -253,6 +253,31 @@ def _upsert_product_attributes(client, product: dict):
         )
 
 
+def sync_all_products(client, http):
+    """
+    Sync products for all tracked categories.
+
+    For each category in TRACKED_CATEGORIES, reads its groups from the DB
+    and syncs products for all of them, one group at a time.
+    """
+    for category_id in config.TRACKED_CATEGORIES:
+        logger.info("Starting products sync for category %d", category_id)
+
+        result = client.execute(
+            "SELECT group_id FROM groups "
+            "WHERE source = ? AND category_id = ? "
+            "ORDER BY group_id",
+            [config.SOURCE, category_id],
+        )
+        group_ids = [row[0] for row in result.rows]
+        logger.info(
+            "Category %d has %d groups to sync",
+            category_id, len(group_ids),
+        )
+
+        sync_products_for_groups(client, http, group_ids)
+
+
 def sync_products_for_groups(client, http, group_ids: list[int]):
     """
     Download products for a list of groups, one group at a time.

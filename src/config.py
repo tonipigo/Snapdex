@@ -45,6 +45,7 @@ IGNORED_ATTRIBUTES = {
     "Retreat Cost",
     "CardText",
     "Description",
+    "Flavor Text",
 }
 
 # Attributes ignored by pattern (prefix match, no warnings)
