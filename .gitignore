@@ -24,3 +24,6 @@ Thumbs.db
 
 # Note personali
 private/
+
+# Cartella test
+tools/
