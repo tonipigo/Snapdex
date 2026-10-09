@@ -8,18 +8,19 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
-def get_state(client) -> dict:
-    """Read the single sync_state row."""
-    result = client.execute(
+def get_state(conn) -> dict:
+    cursor = conn.execute(
         "SELECT last_remote_timestamp, last_successful_sync, "
-        "last_run_at, sync_in_progress FROM sync_state WHERE id = 1"
+        "last_run_at, sync_in_progress, last_price_snapshot "
+        "FROM sync_state WHERE id = 1"
     )
-    row = result.rows[0]
+    row = cursor.fetchone()
     return {
-        "last_remote_timestamp": row[0],
-        "last_successful_sync": row[1],
-        "last_run_at": row[2],
-        "sync_in_progress": row[3],
+        "last_remote_timestamp": row["last_remote_timestamp"],
+        "last_successful_sync": row["last_successful_sync"],
+        "last_run_at": row["last_run_at"],
+        "sync_in_progress": row["sync_in_progress"],
+        "last_price_snapshot": row["last_price_snapshot"],
     }
 
 

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Categories
 # ---------------------------------------------------------------------------
 
-def sync_categories(client, http):
+def sync_categories(conn, http):
     """
     Download categories and upsert the ones we track into the database.
 
@@ -54,7 +54,7 @@ def sync_categories(client, http):
     logger.info("Upserting %d tracked categories", len(tracked))
 
     for cat in tracked:
-        client.execute(
+        conn.execute(
             """
             INSERT INTO categories
                 (category_id, source, language, name, display_name,
@@ -69,7 +69,7 @@ def sync_categories(client, http):
                 modified_on    = excluded.modified_on,
                 last_synced_at = excluded.last_synced_at
             """,
-            [
+            (
                 cat["category_id"],
                 cat["source"],
                 cat["language"],
@@ -78,15 +78,16 @@ def sync_categories(client, http):
                 cat["popularity"],
                 cat["modified_on"],
                 cat["last_synced_at"],
-            ],
+            ),
         )
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
 # Groups
 # ---------------------------------------------------------------------------
 
-def sync_groups(client, http):
+def sync_groups(conn, http):
     """
     Download groups for each tracked category and upsert them.
     """
@@ -102,7 +103,7 @@ def sync_groups(client, http):
         )
 
         for group in results:
-            client.execute(
+            conn.execute(
                 """
                 INSERT INTO groups
                     (group_id, source, category_id, name, abbreviation,
@@ -117,7 +118,7 @@ def sync_groups(client, http):
                     published_on    = excluded.published_on,
                     modified_on     = excluded.modified_on
                 """,
-                [
+                (
                     group["groupId"],
                     config.SOURCE,
                     category_id,
@@ -126,9 +127,10 @@ def sync_groups(client, http):
                     1 if group.get("isSupplemental") else 0,
                     group.get("publishedOn"),
                     group.get("modifiedOn"),
-                ],
+                ),
             )
             total += 1
+        conn.commit()
 
     logger.info("Groups sync complete: %d groups upserted", total)
 
@@ -137,7 +139,7 @@ def sync_groups(client, http):
 # Products
 # ---------------------------------------------------------------------------
 
-def sync_products(client, http, group_id: int):
+def sync_products(conn, http, group_id: int):
     """
     Download products for a single group and upsert them.
 
@@ -147,7 +149,7 @@ def sync_products(client, http, group_id: int):
     Attributes in IGNORED_ATTRIBUTES are silently skipped.
     Unknown attributes are logged as warnings and skipped.
     """
-    category_id = _find_category_for_group(client, group_id)
+    category_id = _find_category_for_group(conn, group_id)
     if category_id is None:
         logger.error("Group %d not found in DB, cannot sync products", group_id)
         return
@@ -161,13 +163,14 @@ def sync_products(client, http, group_id: int):
     logger.info("Received %d products for group %d", len(results), group_id)
 
     for product in results:
-        _upsert_product(client, product, category_id, language)
-        _upsert_product_attributes(client, product)
+        _upsert_product(conn, product, category_id, language)
+        _upsert_product_attributes(conn, product)
 
+    conn.commit()
     logger.info("Products sync complete for group %d", group_id)
 
 
-def sync_products_for_groups(client, http, group_ids: list[int]):
+def sync_products_for_groups(conn, http, group_ids: list):
     """
     Download products for a list of groups, one group at a time.
 
@@ -179,10 +182,11 @@ def sync_products_for_groups(client, http, group_ids: list[int]):
 
     for group_id in group_ids:
         try:
-            sync_products(client, http, group_id)
+            sync_products(conn, http, group_id)
             succeeded += 1
         except Exception:
             logger.exception("Failed to sync products for group %d", group_id)
+            conn.rollback()
             failed += 1
 
     logger.info(
@@ -191,7 +195,7 @@ def sync_products_for_groups(client, http, group_ids: list[int]):
     )
 
 
-def sync_all_products(client, http):
+def sync_all_products(conn, http):
     """
     Sync products for all tracked categories.
 
@@ -201,39 +205,38 @@ def sync_all_products(client, http):
     for category_id in config.TRACKED_CATEGORIES:
         logger.info("Starting products sync for category %d", category_id)
 
-        result = client.execute(
+        cursor = conn.execute(
             "SELECT group_id FROM groups "
             "WHERE source = ? AND category_id = ? "
             "ORDER BY group_id",
-            [config.SOURCE, category_id],
+            (config.SOURCE, category_id),
         )
-        group_ids = [row[0] for row in result.rows]
+        group_ids = [row["group_id"] for row in cursor.fetchall()]
         logger.info(
             "Category %d has %d groups to sync",
             category_id, len(group_ids),
         )
 
-        sync_products_for_groups(client, http, group_ids)
+        sync_products_for_groups(conn, http, group_ids)
 
 
 # ---------------------------------------------------------------------------
 # Prices
 # ---------------------------------------------------------------------------
 
-def sync_prices(client, http, group_id: int, snapshot_date: str = None):
+def sync_prices(conn, http, group_id: int, snapshot_date: str = None):
     """
-    Download prices for a single group.
+    Download prices for a single group and append them to `prices`.
 
-    Writes to both `prices` (current snapshot, upsert) and `price_history`
-    (append-only, one row per day). Both tables use the composite key
-    (source, product_id, sub_type).
+    Each price record is inserted with the given snapshot_date. Previous
+    snapshots for the same product are preserved.
 
     snapshot_date defaults to today (UTC) in 'YYYY-MM-DD' format.
     """
     if snapshot_date is None:
         snapshot_date = _today_iso()
 
-    category_id = _find_category_for_group(client, group_id)
+    category_id = _find_category_for_group(conn, group_id)
     if category_id is None:
         logger.error("Group %d not found in DB, cannot sync prices", group_id)
         return
@@ -246,81 +249,97 @@ def sync_prices(client, http, group_id: int, snapshot_date: str = None):
     logger.info("Received %d price records for group %d", len(results), group_id)
 
     for price in results:
-        _upsert_price(client, price)
-        _append_price_history(client, price, snapshot_date)
+        _insert_price_snapshot(conn, price, snapshot_date)
 
+    conn.commit()
     logger.info("Prices sync complete for group %d", group_id)
 
 
-def sync_prices_for_groups(client, http, group_ids: list[int], snapshot_date: str):
+def _sync_prices_for_groups(conn, http, group_ids: list, snapshot_date: str):
     """
     Download prices for a list of groups, one group at a time.
 
-    If a group fails, logs the error and continues with the next.
+    Returns (succeeded, failed).
     """
     succeeded = 0
     failed = 0
 
     for group_id in group_ids:
         try:
-            sync_prices(client, http, group_id, snapshot_date)
+            sync_prices(conn, http, group_id, snapshot_date)
             succeeded += 1
         except Exception:
             logger.exception("Failed to sync prices for group %d", group_id)
+            conn.rollback()
             failed += 1
 
     logger.info(
         "Batch prices sync complete: %d succeeded, %d failed",
         succeeded, failed,
     )
+    return succeeded, failed
 
 
-def sync_all_prices(client, http):
+def sync_all_prices(conn, http):
     """
     Sync prices for all tracked categories.
 
-    For each category, reads its groups from the DB and syncs prices
-    for all of them, one group at a time.
+    Only updates sync_state.last_price_snapshot if every group was
+    successfully synced. This ensures the "current price" always points
+    to a complete snapshot.
     """
     snapshot_date = _today_iso()
     logger.info("Snapshot date: %s", snapshot_date)
 
+    all_succeeded = True
     for category_id in config.TRACKED_CATEGORIES:
         logger.info("Starting prices sync for category %d", category_id)
 
-        result = client.execute(
+        cursor = conn.execute(
             "SELECT group_id FROM groups "
             "WHERE source = ? AND category_id = ? "
             "ORDER BY group_id",
-            [config.SOURCE, category_id],
+            (config.SOURCE, category_id),
         )
-        group_ids = [row[0] for row in result.rows]
+        group_ids = [row["group_id"] for row in cursor.fetchall()]
         logger.info(
             "Category %d has %d groups to sync",
             category_id, len(group_ids),
         )
 
-        sync_prices_for_groups(client, http, group_ids, snapshot_date)
+        succeeded, failed = _sync_prices_for_groups(
+            conn, http, group_ids, snapshot_date
+        )
+        if failed > 0:
+            all_succeeded = False
+
+    if all_succeeded:
+        _set_last_price_snapshot(conn, snapshot_date)
+    else:
+        logger.warning(
+            "Not updating last_price_snapshot: some groups failed to sync"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _find_category_for_group(client, group_id: int):
+def _find_category_for_group(conn, group_id: int):
     """Return the category_id of a group, or None if not found."""
-    result = client.execute(
+    cursor = conn.execute(
         "SELECT category_id FROM groups WHERE source = ? AND group_id = ?",
-        [config.SOURCE, group_id],
+        (config.SOURCE, group_id),
     )
-    if not result.rows:
+    row = cursor.fetchone()
+    if row is None:
         return None
-    return result.rows[0][0]
+    return row["category_id"]
 
 
-def _upsert_product(client, product: dict, category_id: int, language: str):
+def _upsert_product(conn, product: dict, category_id: int, language: str):
     """Upsert one row into products."""
-    client.execute(
+    conn.execute(
         """
         INSERT INTO products
             (product_id, source, language, category_id, group_id, name,
@@ -336,7 +355,7 @@ def _upsert_product(client, product: dict, category_id: int, language: str):
             url         = excluded.url,
             modified_on = excluded.modified_on
         """,
-        [
+        (
             product["productId"],
             config.SOURCE,
             language,
@@ -346,11 +365,11 @@ def _upsert_product(client, product: dict, category_id: int, language: str):
             product.get("imageUrl"),
             product.get("url"),
             product.get("modifiedOn"),
-        ],
+        ),
     )
 
 
-def _upsert_product_attributes(client, product: dict):
+def _upsert_product_attributes(conn, product: dict):
     """
     Upsert extendedData attributes for one product.
 
@@ -385,7 +404,7 @@ def _upsert_product_attributes(client, product: dict):
             if canonical_key == "rarity" and value == "None":
                 value = None
 
-            client.execute(
+            conn.execute(
                 """
                 INSERT INTO product_extended_attrs
                     (source, product_id, attr_key, attr_value)
@@ -394,7 +413,7 @@ def _upsert_product_attributes(client, product: dict):
                 ON CONFLICT (source, product_id, attr_key) DO UPDATE SET
                     attr_value = excluded.attr_value
                 """,
-                [config.SOURCE, product_id, canonical_key, value],
+                (config.SOURCE, product_id, canonical_key, value),
             )
             continue
 
@@ -405,40 +424,11 @@ def _upsert_product_attributes(client, product: dict):
         )
 
 
-def _upsert_price(client, price: dict):
-    """Upsert one row into `prices` (current snapshot)."""
-    client.execute(
+def _insert_price_snapshot(conn, price: dict, snapshot_date: str):
+    """Insert one row into `prices` for the given snapshot date."""
+    conn.execute(
         """
         INSERT INTO prices
-            (source, product_id, sub_type, low_price, mid_price, high_price,
-             market_price, direct_low_price)
-        VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (source, product_id, sub_type) DO UPDATE SET
-            low_price         = excluded.low_price,
-            mid_price         = excluded.mid_price,
-            high_price        = excluded.high_price,
-            market_price      = excluded.market_price,
-            direct_low_price  = excluded.direct_low_price
-        """,
-        [
-            config.SOURCE,
-            price["productId"],
-            price["subTypeName"],
-            price.get("lowPrice"),
-            price.get("midPrice"),
-            price.get("highPrice"),
-            price.get("marketPrice"),
-            price.get("directLowPrice"),
-        ],
-    )
-
-
-def _append_price_history(client, price: dict, snapshot_date: str):
-    """Insert one row into `price_history` for today's snapshot."""
-    client.execute(
-        """
-        INSERT INTO price_history
             (source, product_id, sub_type, snapshot_date, low_price,
              mid_price, high_price, market_price, direct_low_price)
         VALUES
@@ -450,7 +440,7 @@ def _append_price_history(client, price: dict, snapshot_date: str):
             market_price      = excluded.market_price,
             direct_low_price  = excluded.direct_low_price
         """,
-        [
+        (
             config.SOURCE,
             price["productId"],
             price["subTypeName"],
@@ -460,8 +450,18 @@ def _append_price_history(client, price: dict, snapshot_date: str):
             price.get("highPrice"),
             price.get("marketPrice"),
             price.get("directLowPrice"),
-        ],
+        ),
     )
+
+
+def _set_last_price_snapshot(conn, snapshot_date: str):
+    """Update sync_state.last_price_snapshot to the given date."""
+    conn.execute(
+        "UPDATE sync_state SET last_price_snapshot = ? WHERE id = 1",
+        (snapshot_date,),
+    )
+    conn.commit()
+    logger.info("sync_state.last_price_snapshot updated to %s", snapshot_date)
 
 
 # ---------------------------------------------------------------------------

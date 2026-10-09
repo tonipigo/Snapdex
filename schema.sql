@@ -3,7 +3,7 @@
 -- Decisioni di riferimento: schema_decisions.md
 --
 -- Nota sul partizionamento:
--- `price_history` è per ora una tabella unica. Il partizionamento per anno
+-- `prices` è per ora una tabella unica. Il partizionamento per anno
 -- è rinviato a quando il volume lo richiederà (vedi schema_decisions.md).
 
 PRAGMA foreign_keys = ON;
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS categories (
     display_name      TEXT,
     popularity        INTEGER,
     modified_on       TEXT,             -- audit only
-    last_synced_at    TEXT    NOT NULL, -- quando abbiamo visto questa categoria per la prima volta
+    last_synced_at    TEXT    NOT NULL,
 
     PRIMARY KEY (source, category_id)
 );
@@ -112,80 +112,53 @@ CREATE INDEX IF NOT EXISTS idx_attrs_key_value
 -- ---------------------------------------------------------------------------
 -- prices
 -- ---------------------------------------------------------------------------
--- Snapshot corrente dei prezzi. Chiave composita (product_id, sub_type).
--- Un prodotto ha 1 prezzo in JP, 1-3 in EN.
--- Sovrascritta ad ogni sync (contiene solo l'ultimo snapshot).
+-- Storico completo dei prezzi. Una riga per (prodotto, variante, data).
+-- La chiave primaria include `snapshot_date`: ad ogni sync giornaliero
+-- si aggiunge una nuova riga, senza sovrascrivere le precedenti.
 --
--- NOTA: questa tabella è oggi ridondante con l'ultima riga di `price_history`.
--- Serve per query veloci su "prezzo attuale" senza scorrere lo storico.
--- La teniamo separata finché il costo di scrittura su Turso resta accettabile.
--- Se in futuro il costo diventa un problema, valuteremo di eliminarla e
--- ricavare l'ultimo prezzo da `price_history` con una query più pesante.
+-- Il valore "prezzo attuale" si ottiene filtrando per l'ultima
+-- snapshot_date, che è memorizzata in sync_state.last_price_snapshot.
+--
+-- La tabella cresce molto nel tempo (~100k righe/giorno, ~35M/anno).
+-- Il partizionamento per anno è rinviato a quando il volume lo richiederà.
 
 CREATE TABLE IF NOT EXISTS prices (
     source            TEXT    NOT NULL DEFAULT 'tcgcsv',
     product_id        INTEGER NOT NULL,
     sub_type          TEXT    NOT NULL,  -- 'Normal', 'Holofoil', 'Reverse Holofoil', ...
+    snapshot_date     TEXT    NOT NULL,  -- 'YYYY-MM-DD'
     low_price         REAL,
     mid_price         REAL,
     high_price        REAL,              -- audit only
     market_price      REAL,              -- nullable, campo principale
     direct_low_price  REAL,              -- nullable
 
-    PRIMARY KEY (source, product_id, sub_type),
-    FOREIGN KEY (source, product_id)
-        REFERENCES products (source, product_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_prices_product
-    ON prices (source, product_id);
-
-
--- ---------------------------------------------------------------------------
--- price_history
--- ---------------------------------------------------------------------------
--- Storico append-only. Una riga per (prodotto, variante, data).
--- Cresce molto nel tempo. Partizionamento rinviato a quando il volume
--- lo richiederà (vedi schema_decisions.md).
---
--- NOTA: il campo `snapshot_date` è la data in cui il prezzo è stato
--- osservato dal sync (UTC). Una riga per giorno per prodotto.
-
-CREATE TABLE IF NOT EXISTS price_history (
-    source            TEXT    NOT NULL DEFAULT 'tcgcsv',
-    product_id        INTEGER NOT NULL,
-    sub_type          TEXT    NOT NULL,
-    snapshot_date     TEXT    NOT NULL,  -- 'YYYY-MM-DD'
-    low_price         REAL,
-    mid_price         REAL,
-    high_price        REAL,
-    market_price      REAL,
-    direct_low_price  REAL,
-
     PRIMARY KEY (source, product_id, sub_type, snapshot_date),
     FOREIGN KEY (source, product_id)
         REFERENCES products (source, product_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_history_date
-    ON price_history (snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_prices_date
+    ON prices (snapshot_date);
 
-CREATE INDEX IF NOT EXISTS idx_history_product_date
-    ON price_history (source, product_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_prices_product_date
+    ON prices (source, product_id, snapshot_date);
 
 
 -- ---------------------------------------------------------------------------
 -- sync_state
 -- ---------------------------------------------------------------------------
 -- Stato del sync, in una sola riga (id = 1).
--- Contiene il timestamp remoto dell'ultimo last-updated.txt processato.
+-- Contiene il timestamp remoto dell'ultimo last-updated.txt processato
+-- e l'ultima snapshot_date completata per i prezzi.
 
 CREATE TABLE IF NOT EXISTS sync_state (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     last_remote_timestamp  TEXT,           -- contenuto di last-updated.txt
     last_successful_sync   TEXT,           -- quando ha finito l'ultimo sync OK
     last_run_at            TEXT,           -- ultima esecuzione (anche fallita)
-    sync_in_progress       INTEGER NOT NULL DEFAULT 0
+    sync_in_progress       INTEGER NOT NULL DEFAULT 0,
+    last_price_snapshot    TEXT            -- 'YYYY-MM-DD', ultima snapshot prezzi completa
 );
 
 -- Riga singola, inizializzata al primo avvio.

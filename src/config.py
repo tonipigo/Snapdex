@@ -3,15 +3,24 @@ Configuration constants for Snapdex.
 """
 
 import os
+from dotenv import load_dotenv
+
+# Carica le variabili dal file .env (nella root del progetto)
+load_dotenv()
 
 # --- Paths ---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, "schema.sql")
 
 # --- Database ---
-# Local DB for development. Replace with Turso cloud URL + token later.
-DB_PATH = os.path.join(PROJECT_ROOT, "snapdex.db")
-DB_URL = f"file:{DB_PATH}"
+# Turso cloud (via pyturso local sync)
+TURSO_DATABASE_URL = os.environ["TURSO_DATABASE_URL"]
+TURSO_AUTH_TOKEN = os.environ["TURSO_AUTH_TOKEN"]
+
+# Percorso del DB locale temporaneo usato da pyturso per il sync.
+# IMPORTANTE: spostalo FUORI da OneDrive per evitare corruzione.
+# Esempio: r"C:\Users\pigol\Snapdex\snapdex.db"
+LOCAL_DB_PATH = os.path.join(PROJECT_ROOT, "snapdex.db")
 
 # --- Source ---
 SOURCE = "tcgcsv"
