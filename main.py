@@ -37,38 +37,22 @@ def main():
     # 4. Run sync
     sync_state.mark_run(client)
     try:
-        # sync.sync_categories(client, http)
-        # sync.sync_groups(client, http)
-        sync.sync_products(client, http, group_id=3170)
+        # Prendi 5 gruppi EN a caso dal DB per il test
+        result = client.execute(
+            "SELECT group_id FROM groups "
+            "WHERE source = 'tcgcsv' AND category_id = 3 "
+            "ORDER BY group_id DESC LIMIT 5"
+        )
+        group_ids = [row[0] for row in result.rows]
+        logger.info("Testing batch sync on groups: %s", group_ids)
+
+        sync.sync_products_for_groups(client, http, group_ids)
         sync_state.mark_success(client, remote_ts)
         logger.info("Sync completed successfully.")
     except Exception:
         logger.exception("Sync failed")
         sync_state.mark_failed(client)
         raise
-
-    result = client.execute(
-        "SELECT COUNT(*) FROM products WHERE group_id = 3170 AND source = 'tcgcsv'"
-    )
-    print(f"Products in group 3170: {result.rows[0][0]}")
-
-    result = client.execute(
-        "SELECT attr_key, COUNT(*) FROM product_extended_attrs pea "
-        "JOIN products p ON p.product_id = pea.product_id "
-        "WHERE p.group_id = 3170 AND p.source = 'tcgcsv' "
-        "GROUP BY attr_key ORDER BY attr_key"
-    )
-    print("Attributes for group 3170:")
-    for row in result.rows:
-        print(f"  - {row[0]}: {row[1]}")
-
-    result = client.execute(
-        "SELECT COUNT(*) FROM product_extended_attrs pea "
-        "JOIN products p ON p.product_id = pea.product_id "
-        "WHERE p.group_id = 3170 AND pea.attr_key = 'rarity' "
-        "AND pea.attr_value IS NULL"
-    )
-    print(f"Products with NULL rarity: {result.rows[0][0]}")
 
 if __name__ == "__main__":
     main()

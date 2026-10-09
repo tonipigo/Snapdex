@@ -34,7 +34,7 @@ ATTRIBUTE_MAP = {
     "CardType":  "card_type",
 }
 
-# Attributes that are intentionally ignored (don't log warnings for them)
+# Attributes intentionally ignored (no warnings)
 IGNORED_ATTRIBUTES = {
     "UPC",
     "HP",
@@ -45,8 +45,11 @@ IGNORED_ATTRIBUTES = {
     "Retreat Cost",
     "CardText",
     "Description",
-    "Attack 1",
-    "Attack 2",
+}
+
+# Attributes ignored by pattern (prefix match, no warnings)
+IGNORED_ATTRIBUTE_PREFIXES = {
+    "Attack ",
 }
 
 # --- HTTP client ---

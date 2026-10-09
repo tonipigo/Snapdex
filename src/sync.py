@@ -202,8 +202,11 @@ def _upsert_product_attributes(client, product: dict):
     """
     Upsert extendedData attributes for one product.
 
-    Only keys in ATTRIBUTE_MAP are written. Keys in IGNORED_ATTRIBUTES are
-    silently skipped. Unknown keys are logged as warnings.
+    Order of checks:
+      1. Exact match in IGNORED_ATTRIBUTES   -> skip silently
+      2. Prefix match in IGNORED_ATTRIBUTE_PREFIXES -> skip silently
+      3. Match in ATTRIBUTE_MAP              -> normalize and write
+      4. Otherwise                           -> log warning and skip
     """
     product_id = product["productId"]
     extended = product.get("extendedData", [])
@@ -213,11 +216,15 @@ def _upsert_product_attributes(client, product: dict):
         if raw_key is None:
             continue
 
-        # Ignored: skip silently
+        # 1. Ignored by exact name
         if raw_key in config.IGNORED_ATTRIBUTES:
             continue
 
-        # Mapped: normalize and write
+        # 2. Ignored by prefix (e.g. "Attack 1", "Attack 2", ...)
+        if any(raw_key.startswith(p) for p in config.IGNORED_ATTRIBUTE_PREFIXES):
+            continue
+
+        # 3. Mapped: normalize and write
         if raw_key in config.ATTRIBUTE_MAP:
             canonical_key = config.ATTRIBUTE_MAP[raw_key]
             value = attr.get("value")
@@ -239,11 +246,35 @@ def _upsert_product_attributes(client, product: dict):
             )
             continue
 
-        # Unknown: log and skip
+        # 4. Unknown: log warning and skip
         logger.warning(
             "Unknown attribute key for product %d: %r",
             product_id, raw_key,
         )
+
+
+def sync_products_for_groups(client, http, group_ids: list[int]):
+    """
+    Download products for a list of groups, one group at a time.
+
+    If a group fails, logs the error and continues with the next.
+    At the end, logs a summary of successes and failures.
+    """
+    succeeded = 0
+    failed = 0
+
+    for group_id in group_ids:
+        try:
+            sync_products(client, http, group_id)
+            succeeded += 1
+        except Exception:
+            logger.exception("Failed to sync products for group %d", group_id)
+            failed += 1
+
+    logger.info(
+        "Batch sync complete: %d succeeded, %d failed",
+        succeeded, failed,
+    )
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
