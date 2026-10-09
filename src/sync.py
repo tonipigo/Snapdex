@@ -1,8 +1,7 @@
 """
 Sync logic for Snapdex.
 
-Currently only handles categories. Groups, products, and prices will be
-added incrementally, following the same pattern.
+Handles categories, groups, products, and prices.
 """
 
 import logging
@@ -12,6 +11,10 @@ from src import config
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Categories
+# ---------------------------------------------------------------------------
 
 def sync_categories(client, http):
     """
@@ -76,8 +79,12 @@ def sync_categories(client, http):
                 cat["modified_on"],
                 cat["last_synced_at"],
             ],
-        ) 
+        )
 
+
+# ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
 
 def sync_groups(client, http):
     """
@@ -125,6 +132,11 @@ def sync_groups(client, http):
 
     logger.info("Groups sync complete: %d groups upserted", total)
 
+
+# ---------------------------------------------------------------------------
+# Products
+# ---------------------------------------------------------------------------
+
 def sync_products(client, http, group_id: int):
     """
     Download products for a single group and upsert them.
@@ -154,6 +166,146 @@ def sync_products(client, http, group_id: int):
 
     logger.info("Products sync complete for group %d", group_id)
 
+
+def sync_products_for_groups(client, http, group_ids: list[int]):
+    """
+    Download products for a list of groups, one group at a time.
+
+    If a group fails, logs the error and continues with the next.
+    At the end, logs a summary of successes and failures.
+    """
+    succeeded = 0
+    failed = 0
+
+    for group_id in group_ids:
+        try:
+            sync_products(client, http, group_id)
+            succeeded += 1
+        except Exception:
+            logger.exception("Failed to sync products for group %d", group_id)
+            failed += 1
+
+    logger.info(
+        "Batch sync complete: %d succeeded, %d failed",
+        succeeded, failed,
+    )
+
+
+def sync_all_products(client, http):
+    """
+    Sync products for all tracked categories.
+
+    For each category in TRACKED_CATEGORIES, reads its groups from the DB
+    and syncs products for all of them, one group at a time.
+    """
+    for category_id in config.TRACKED_CATEGORIES:
+        logger.info("Starting products sync for category %d", category_id)
+
+        result = client.execute(
+            "SELECT group_id FROM groups "
+            "WHERE source = ? AND category_id = ? "
+            "ORDER BY group_id",
+            [config.SOURCE, category_id],
+        )
+        group_ids = [row[0] for row in result.rows]
+        logger.info(
+            "Category %d has %d groups to sync",
+            category_id, len(group_ids),
+        )
+
+        sync_products_for_groups(client, http, group_ids)
+
+
+# ---------------------------------------------------------------------------
+# Prices
+# ---------------------------------------------------------------------------
+
+def sync_prices(client, http, group_id: int, snapshot_date: str = None):
+    """
+    Download prices for a single group.
+
+    Writes to both `prices` (current snapshot, upsert) and `price_history`
+    (append-only, one row per day). Both tables use the composite key
+    (source, product_id, sub_type).
+
+    snapshot_date defaults to today (UTC) in 'YYYY-MM-DD' format.
+    """
+    if snapshot_date is None:
+        snapshot_date = _today_iso()
+
+    category_id = _find_category_for_group(client, group_id)
+    if category_id is None:
+        logger.error("Group %d not found in DB, cannot sync prices", group_id)
+        return
+
+    path = f"/tcgplayer/{category_id}/{group_id}/prices"
+    logger.info("Fetching prices for group %d (category %d)", group_id, category_id)
+
+    data = http.fetch_json(path)
+    results = data.get("results", [])
+    logger.info("Received %d price records for group %d", len(results), group_id)
+
+    for price in results:
+        _upsert_price(client, price)
+        _append_price_history(client, price, snapshot_date)
+
+    logger.info("Prices sync complete for group %d", group_id)
+
+
+def sync_prices_for_groups(client, http, group_ids: list[int], snapshot_date: str):
+    """
+    Download prices for a list of groups, one group at a time.
+
+    If a group fails, logs the error and continues with the next.
+    """
+    succeeded = 0
+    failed = 0
+
+    for group_id in group_ids:
+        try:
+            sync_prices(client, http, group_id, snapshot_date)
+            succeeded += 1
+        except Exception:
+            logger.exception("Failed to sync prices for group %d", group_id)
+            failed += 1
+
+    logger.info(
+        "Batch prices sync complete: %d succeeded, %d failed",
+        succeeded, failed,
+    )
+
+
+def sync_all_prices(client, http):
+    """
+    Sync prices for all tracked categories.
+
+    For each category, reads its groups from the DB and syncs prices
+    for all of them, one group at a time.
+    """
+    snapshot_date = _today_iso()
+    logger.info("Snapshot date: %s", snapshot_date)
+
+    for category_id in config.TRACKED_CATEGORIES:
+        logger.info("Starting prices sync for category %d", category_id)
+
+        result = client.execute(
+            "SELECT group_id FROM groups "
+            "WHERE source = ? AND category_id = ? "
+            "ORDER BY group_id",
+            [config.SOURCE, category_id],
+        )
+        group_ids = [row[0] for row in result.rows]
+        logger.info(
+            "Category %d has %d groups to sync",
+            category_id, len(group_ids),
+        )
+
+        sync_prices_for_groups(client, http, group_ids, snapshot_date)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _find_category_for_group(client, group_id: int):
     """Return the category_id of a group, or None if not found."""
@@ -203,10 +355,10 @@ def _upsert_product_attributes(client, product: dict):
     Upsert extendedData attributes for one product.
 
     Order of checks:
-      1. Exact match in IGNORED_ATTRIBUTES   -> skip silently
-      2. Prefix match in IGNORED_ATTRIBUTE_PREFIXES -> skip silently
-      3. Match in ATTRIBUTE_MAP              -> normalize and write
-      4. Otherwise                           -> log warning and skip
+      1. Exact match in IGNORED_ATTRIBUTES            -> skip silently
+      2. Prefix match in IGNORED_ATTRIBUTE_PREFIXES   -> skip silently
+      3. Match in ATTRIBUTE_MAP                       -> normalize and write
+      4. Otherwise                                    -> log warning and skip
     """
     product_id = product["productId"]
     extended = product.get("extendedData", [])
@@ -253,53 +405,72 @@ def _upsert_product_attributes(client, product: dict):
         )
 
 
-def sync_all_products(client, http):
-    """
-    Sync products for all tracked categories.
-
-    For each category in TRACKED_CATEGORIES, reads its groups from the DB
-    and syncs products for all of them, one group at a time.
-    """
-    for category_id in config.TRACKED_CATEGORIES:
-        logger.info("Starting products sync for category %d", category_id)
-
-        result = client.execute(
-            "SELECT group_id FROM groups "
-            "WHERE source = ? AND category_id = ? "
-            "ORDER BY group_id",
-            [config.SOURCE, category_id],
-        )
-        group_ids = [row[0] for row in result.rows]
-        logger.info(
-            "Category %d has %d groups to sync",
-            category_id, len(group_ids),
-        )
-
-        sync_products_for_groups(client, http, group_ids)
-
-
-def sync_products_for_groups(client, http, group_ids: list[int]):
-    """
-    Download products for a list of groups, one group at a time.
-
-    If a group fails, logs the error and continues with the next.
-    At the end, logs a summary of successes and failures.
-    """
-    succeeded = 0
-    failed = 0
-
-    for group_id in group_ids:
-        try:
-            sync_products(client, http, group_id)
-            succeeded += 1
-        except Exception:
-            logger.exception("Failed to sync products for group %d", group_id)
-            failed += 1
-
-    logger.info(
-        "Batch sync complete: %d succeeded, %d failed",
-        succeeded, failed,
+def _upsert_price(client, price: dict):
+    """Upsert one row into `prices` (current snapshot)."""
+    client.execute(
+        """
+        INSERT INTO prices
+            (source, product_id, sub_type, low_price, mid_price, high_price,
+             market_price, direct_low_price)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source, product_id, sub_type) DO UPDATE SET
+            low_price         = excluded.low_price,
+            mid_price         = excluded.mid_price,
+            high_price        = excluded.high_price,
+            market_price      = excluded.market_price,
+            direct_low_price  = excluded.direct_low_price
+        """,
+        [
+            config.SOURCE,
+            price["productId"],
+            price["subTypeName"],
+            price.get("lowPrice"),
+            price.get("midPrice"),
+            price.get("highPrice"),
+            price.get("marketPrice"),
+            price.get("directLowPrice"),
+        ],
     )
+
+
+def _append_price_history(client, price: dict, snapshot_date: str):
+    """Insert one row into `price_history` for today's snapshot."""
+    client.execute(
+        """
+        INSERT INTO price_history
+            (source, product_id, sub_type, snapshot_date, low_price,
+             mid_price, high_price, market_price, direct_low_price)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source, product_id, sub_type, snapshot_date) DO UPDATE SET
+            low_price         = excluded.low_price,
+            mid_price         = excluded.mid_price,
+            high_price        = excluded.high_price,
+            market_price      = excluded.market_price,
+            direct_low_price  = excluded.direct_low_price
+        """,
+        [
+            config.SOURCE,
+            price["productId"],
+            price["subTypeName"],
+            snapshot_date,
+            price.get("lowPrice"),
+            price.get("midPrice"),
+            price.get("highPrice"),
+            price.get("marketPrice"),
+            price.get("directLowPrice"),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------------
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")

@@ -22,7 +22,7 @@ def main():
     # 1. Prepare DB and HTTP client
     db.apply_schema()
     client = db.connect()
-    #client.execute("UPDATE sync_state SET last_remote_timestamp = NULL WHERE id = 1")
+    client.execute("UPDATE sync_state SET last_remote_timestamp = NULL WHERE id = 1")
     http = TCGCSVClient()
 
     # 2. Check remote timestamp
@@ -37,14 +37,9 @@ def main():
     # 4. Run sync
     sync_state.mark_run(client)
     try:
-        sync.sync_all_products(client, http)
+        sync.sync_prices(client, http, group_id=3170)
         sync_state.mark_success(client, remote_ts)
         logger.info("Sync completed successfully.")
-    except Exception:
-        logger.exception("Sync failed")
-        sync_state.mark_failed(client)
-        raise
-
     except Exception:
         logger.exception("Sync failed")
         sync_state.mark_failed(client)
