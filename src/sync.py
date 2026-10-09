@@ -125,5 +125,125 @@ def sync_groups(client, http):
 
     logger.info("Groups sync complete: %d groups upserted", total)
 
+def sync_products(client, http, group_id: int):
+    """
+    Download products for a single group and upsert them.
+
+    For each product, writes one row in `products`, and one row per
+    attribute in `product_extended_attrs` (only for keys in ATTRIBUTE_MAP).
+
+    Attributes in IGNORED_ATTRIBUTES are silently skipped.
+    Unknown attributes are logged as warnings and skipped.
+    """
+    category_id = _find_category_for_group(client, group_id)
+    if category_id is None:
+        logger.error("Group %d not found in DB, cannot sync products", group_id)
+        return
+
+    language = config.TRACKED_CATEGORIES[category_id]
+    path = f"/tcgplayer/{category_id}/{group_id}/products"
+    logger.info("Fetching products for group %d (category %d)", group_id, category_id)
+
+    data = http.fetch_json(path)
+    results = data.get("results", [])
+    logger.info("Received %d products for group %d", len(results), group_id)
+
+    for product in results:
+        _upsert_product(client, product, category_id, language)
+        _upsert_product_attributes(client, product)
+
+    logger.info("Products sync complete for group %d", group_id)
+
+
+def _find_category_for_group(client, group_id: int):
+    """Return the category_id of a group, or None if not found."""
+    result = client.execute(
+        "SELECT category_id FROM groups WHERE source = ? AND group_id = ?",
+        [config.SOURCE, group_id],
+    )
+    if not result.rows:
+        return None
+    return result.rows[0][0]
+
+
+def _upsert_product(client, product: dict, category_id: int, language: str):
+    """Upsert one row into products."""
+    client.execute(
+        """
+        INSERT INTO products
+            (product_id, source, language, category_id, group_id, name,
+             image_url, url, modified_on)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source, product_id) DO UPDATE SET
+            language    = excluded.language,
+            category_id = excluded.category_id,
+            group_id    = excluded.group_id,
+            name        = excluded.name,
+            image_url   = excluded.image_url,
+            url         = excluded.url,
+            modified_on = excluded.modified_on
+        """,
+        [
+            product["productId"],
+            config.SOURCE,
+            language,
+            category_id,
+            product["groupId"],
+            product["name"],
+            product.get("imageUrl"),
+            product.get("url"),
+            product.get("modifiedOn"),
+        ],
+    )
+
+
+def _upsert_product_attributes(client, product: dict):
+    """
+    Upsert extendedData attributes for one product.
+
+    Only keys in ATTRIBUTE_MAP are written. Keys in IGNORED_ATTRIBUTES are
+    silently skipped. Unknown keys are logged as warnings.
+    """
+    product_id = product["productId"]
+    extended = product.get("extendedData", [])
+
+    for attr in extended:
+        raw_key = attr.get("name")
+        if raw_key is None:
+            continue
+
+        # Ignored: skip silently
+        if raw_key in config.IGNORED_ATTRIBUTES:
+            continue
+
+        # Mapped: normalize and write
+        if raw_key in config.ATTRIBUTE_MAP:
+            canonical_key = config.ATTRIBUTE_MAP[raw_key]
+            value = attr.get("value")
+
+            # Special case: JP "None" rarity -> NULL
+            if canonical_key == "rarity" and value == "None":
+                value = None
+
+            client.execute(
+                """
+                INSERT INTO product_extended_attrs
+                    (source, product_id, attr_key, attr_value)
+                VALUES
+                    (?, ?, ?, ?)
+                ON CONFLICT (source, product_id, attr_key) DO UPDATE SET
+                    attr_value = excluded.attr_value
+                """,
+                [config.SOURCE, product_id, canonical_key, value],
+            )
+            continue
+
+        # Unknown: log and skip
+        logger.warning(
+            "Unknown attribute key for product %d: %r",
+            product_id, raw_key,
+        )
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

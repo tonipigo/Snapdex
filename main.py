@@ -22,6 +22,7 @@ def main():
     # 1. Prepare DB and HTTP client
     db.apply_schema()
     client = db.connect()
+    client.execute("UPDATE sync_state SET last_remote_timestamp = NULL WHERE id = 1")
     http = TCGCSVClient()
 
     # 2. Check remote timestamp
@@ -36,14 +37,38 @@ def main():
     # 4. Run sync
     sync_state.mark_run(client)
     try:
-        sync.sync_categories(client, http)
-        sync.sync_groups(client, http)
+        # sync.sync_categories(client, http)
+        # sync.sync_groups(client, http)
+        sync.sync_products(client, http, group_id=3170)
         sync_state.mark_success(client, remote_ts)
         logger.info("Sync completed successfully.")
     except Exception:
         logger.exception("Sync failed")
         sync_state.mark_failed(client)
         raise
+
+    result = client.execute(
+        "SELECT COUNT(*) FROM products WHERE group_id = 3170 AND source = 'tcgcsv'"
+    )
+    print(f"Products in group 3170: {result.rows[0][0]}")
+
+    result = client.execute(
+        "SELECT attr_key, COUNT(*) FROM product_extended_attrs pea "
+        "JOIN products p ON p.product_id = pea.product_id "
+        "WHERE p.group_id = 3170 AND p.source = 'tcgcsv' "
+        "GROUP BY attr_key ORDER BY attr_key"
+    )
+    print("Attributes for group 3170:")
+    for row in result.rows:
+        print(f"  - {row[0]}: {row[1]}")
+
+    result = client.execute(
+        "SELECT COUNT(*) FROM product_extended_attrs pea "
+        "JOIN products p ON p.product_id = pea.product_id "
+        "WHERE p.group_id = 3170 AND pea.attr_key = 'rarity' "
+        "AND pea.attr_value IS NULL"
+    )
+    print(f"Products with NULL rarity: {result.rows[0][0]}")
 
 if __name__ == "__main__":
     main()
