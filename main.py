@@ -37,13 +37,13 @@ def main():
     sync_state.mark_run(client)
     try:
         sync.sync_categories(client, http)
+        sync.sync_groups(client, http)
         sync_state.mark_success(client, remote_ts)
         logger.info("Sync completed successfully.")
     except Exception:
         logger.exception("Sync failed")
         sync_state.mark_failed(client)
         raise
-
 
 if __name__ == "__main__":
     main()
